@@ -126,7 +126,7 @@ async def sse(request: Request):
     sid = str(uuid.uuid4())
     q: asyncio.Queue = asyncio.Queue()
     _sessions[sid] = q
-    base_url = str(request.base_url).rstrip("/")
+    base_url = str(request.base_url).rstrip("/").replace("http://", "https://")
     endpoint_url = f"{base_url}/messages?sessionId={sid}"
 
     async def stream():
