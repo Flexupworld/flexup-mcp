@@ -3,7 +3,6 @@
 Circuly MCP Server — Remote HTTP/SSE (Railway)
 Compatible with Claude.ai custom connectors (MCP 2024-11-05)
 """
-
 import asyncio
 import base64
 import json
@@ -17,12 +16,24 @@ from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-CIRCULY_API_BASE   = os.environ.get("CIRCULY_API_BASE", "https://api.circuly.io/api/2025-01").rstrip("/")
+CIRCULY_API_BASE  = os.environ.get("CIRCULY_API_BASE", "https://api.circuly.io/api/2025-01").rstrip("/")
 CIRCULY_API_KEY    = os.environ.get("CIRCULY_API_KEY", "").strip()
 CIRCULY_API_SECRET = os.environ.get("CIRCULY_API_SECRET", "").strip()
+MCP_SECRET_TOKEN   = os.environ.get("MCP_SECRET_TOKEN", "")
 
 app = FastAPI(title="Circuly MCP")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# ── Bearer token auth ────────────────────────────────────────────────────────
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if request.url.path in ("/health", "/"):
+        return await call_next(request)
+    if MCP_SECRET_TOKEN:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {MCP_SECRET_TOKEN}":
+            return Response("Unauthorized", status_code=401)
+    return await call_next(request)
 
 def _token():
     return base64.b64encode(f"{CIRCULY_API_KEY}:{CIRCULY_API_SECRET}".encode()).decode()
@@ -30,33 +41,35 @@ def _token():
 async def _get(path: str, params=None):
     url = f"{CIRCULY_API_BASE}/{path.lstrip('/')}"
     async with httpx.AsyncClient(timeout=60) as c:
-        r = await c.get(url, headers={"Accept": "application/json", "Authorization": f"Basic {_token()}"}, params=params or {})
-    if r.status_code >= 400:
-        raise RuntimeError(f"Circuly {r.status_code}: {r.text[:500]}")
-    return r.json()
+        r = await c.get(url, headers={"Accept": "application/json",
+                                       "Authorization": f"Basic {_token()}"},
+                        params=params or {})
+        if r.status_code >= 400:
+            raise RuntimeError(f"Circuly {r.status_code}: {r.text[:500]}")
+        return r.json()
 
 TOOLS = [
-    {"name": "circuly_subscriptions_list", "description": "List Circuly subscriptions.", "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
-    {"name": "circuly_customers_list", "description": "List Circuly customers.", "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
-    {"name": "circuly_customer_get", "description": "Get a customer by ID.", "inputSchema": {"type": "object", "properties": {"customer_id": {"type": "string"}}, "required": ["customer_id"]}},
-    {"name": "circuly_orders_list", "description": "List Circuly orders.", "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
-    {"name": "circuly_order_get", "description": "Get an order by ID.", "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}},
-    {"name": "circuly_transactions_list", "description": "List Circuly transactions.", "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
-    {"name": "circuly_recurring_payments_list", "description": "List recurring payments.", "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
-    {"name": "circuly_get", "description": "Generic GET to any Circuly endpoint.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "params": {"type": "object", "default": {}}}, "required": ["path"]}},
+    {"name": "circuly_subscriptions_list",   "description": "List Circuly subscriptions.",    "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
+    {"name": "circuly_customers_list",        "description": "List Circuly customers.",         "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
+    {"name": "circuly_customer_get",          "description": "Get a customer by ID.",           "inputSchema": {"type": "object", "properties": {"customer_id": {"type": "string"}}, "required": ["customer_id"]}},
+    {"name": "circuly_orders_list",           "description": "List Circuly orders.",            "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
+    {"name": "circuly_order_get",             "description": "Get an order by ID.",             "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}},
+    {"name": "circuly_transactions_list",     "description": "List Circuly transactions.",      "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
+    {"name": "circuly_recurring_payments_list","description": "List recurring payments.",       "inputSchema": {"type": "object", "properties": {"params": {"type": "object", "default": {}}}, "required": []}},
+    {"name": "circuly_get",                   "description": "Generic GET to any Circuly endpoint.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "params": {"type": "object", "default": {}}}, "required": ["path"]}},
 ]
 
 async def run_tool(name: str, args: dict) -> str:
     try:
         p = args.get("params") or {}
-        if name == "circuly_subscriptions_list":        res = await _get("/subscriptions", p)
-        elif name == "circuly_customers_list":          res = await _get("/customers", p)
-        elif name == "circuly_customer_get":            res = await _get(f"/customers/{args['customer_id']}")
-        elif name == "circuly_orders_list":             res = await _get("/orders", p)
-        elif name == "circuly_order_get":               res = await _get(f"/orders/{args['order_id']}")
-        elif name == "circuly_transactions_list":       res = await _get("/transactions", p)
-        elif name == "circuly_recurring_payments_list": res = await _get("/recurring-payments", p)
-        elif name == "circuly_get":                     res = await _get(args["path"], p)
+        if   name == "circuly_subscriptions_list":    res = await _get("/subscriptions", p)
+        elif name == "circuly_customers_list":         res = await _get("/customers", p)
+        elif name == "circuly_customer_get":           res = await _get(f"/customers/{args['customer_id']}")
+        elif name == "circuly_orders_list":            res = await _get("/orders", p)
+        elif name == "circuly_order_get":              res = await _get(f"/orders/{args['order_id']}")
+        elif name == "circuly_transactions_list":      res = await _get("/transactions", p)
+        elif name == "circuly_recurring_payments_list":res = await _get("/recurring-payments", p)
+        elif name == "circuly_get":                    res = await _get(args["path"], p)
         else: return f"Unknown tool: {name}"
         t = json.dumps(res, indent=2, ensure_ascii=False, default=str)
         return t[:20000] + "\n…(truncated)" if len(t) > 20000 else t
@@ -65,12 +78,12 @@ async def run_tool(name: str, args: dict) -> str:
 
 async def handle_mcp(msg: dict) -> Optional[dict]:
     method = msg.get("method", "")
-    rid = msg.get("id")
+    rid    = msg.get("id")
     if method == "initialize":
         return {"jsonrpc": "2.0", "id": rid, "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "circuly-mcp", "version": "2.1.0"},
+            "serverInfo": {"name": "circuly-mcp", "version": "2.2.0"},
         }}
     if method in ("notifications/initialized", "notifications/cancelled"):
         return None
@@ -79,7 +92,7 @@ async def handle_mcp(msg: dict) -> Optional[dict]:
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}
     if method == "tools/call":
-        p = msg.get("params", {})
+        p    = msg.get("params", {})
         text = await run_tool(p.get("name", ""), p.get("arguments", {}) or {})
         return {"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": text}]}}
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
@@ -88,12 +101,11 @@ _sessions: Dict[str, asyncio.Queue] = {}
 
 @app.get("/sse")
 async def sse(request: Request):
-    sid = str(uuid.uuid4())
+    sid  = str(uuid.uuid4())
     q: asyncio.Queue = asyncio.Queue()
     _sessions[sid] = q
-    base_url = str(request.base_url).rstrip("/").replace("http://", "https://")
+    base_url     = str(request.base_url).rstrip("/").replace("http://", "https://")
     endpoint_url = f"{base_url}/messages?sessionId={sid}"
-
     async def stream():
         yield f"event: endpoint\ndata: {endpoint_url}\n\n"
         try:
@@ -107,13 +119,14 @@ async def sse(request: Request):
                     yield ": keepalive\n\n"
         finally:
             _sessions.pop(sid, None)
-
     return StreamingResponse(stream(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+                             headers={"Cache-Control": "no-cache, no-transform",
+                                      "X-Accel-Buffering": "no",
+                                      "Connection": "keep-alive"})
 
 @app.post("/messages")
 async def messages(request: Request, sessionId: str):
-    body = await request.json()
+    body     = await request.json()
     response = await handle_mcp(body)
     if response is not None and sessionId in _sessions:
         await _sessions[sessionId].put(response)
@@ -121,7 +134,7 @@ async def messages(request: Request, sessionId: str):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "circuly-mcp", "version": "2.1.0"}
+    return {"status": "ok", "service": "circuly-mcp", "version": "2.2.0"}
 
 @app.get("/")
 async def root():
